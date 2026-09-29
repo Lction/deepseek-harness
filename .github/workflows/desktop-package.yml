@@ -42,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-package-${{ github.ref }}-${{ inputs.build_version }}
+  group: desktop-package-${{ github.ref }}-${{ inputs.build_version }}-${{ inputs.targets }}
   cancel-in-progress: false
 
 env:
