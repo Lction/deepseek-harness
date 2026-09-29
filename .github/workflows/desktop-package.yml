@@ -1,10 +1,13 @@
 # Manual Desktop packaging on GitHub-hosted runners.
 #
-# The Windows target is unsigned here: the release signer needs a SafeNet EV
-# hardware token, which managed runners cannot reach. Signed Windows releases
-# belong on the self-hosted `[self-hosted, dsh-win-ci, windows]` runner.
-# macOS has no unsigned mode in apps/desktop/scripts/package-target.ts, so the
-# mac job always signs and notarizes and needs the certificate secrets below.
+# Targets:
+#   win-x64       Unsigned installer (the release signer needs a SafeNet EV
+#                 hardware token, which managed runners cannot reach). Signed
+#                 Windows releases belong on the self-hosted
+#                 `[self-hosted, dsh-win-ci, windows]` runner.
+#   mac-arm64,
+#   mac-x64       macOS has no unsigned mode in package-target.ts, so these
+#                 always sign and notarize.
 #
 # Required repository secrets:
 #   DESKTOP_ENV_WINDOWS          Full contents of apps/desktop/.env.windows.
@@ -18,6 +21,8 @@
 # The non-secret release fields the scripts require come from those dotenv files:
 # DSH_DESKTOP_APP_ID, the selected DSH_DESKTOP_MANDATORY_UPDATE_*_ORIGIN, and for
 # signed targets the download origin, release ID and signing identity.
+#
+# Each job uploads one artifact named deepseek-harness-<build_version>-<target>.
 
 name: Desktop package
 
@@ -33,10 +38,10 @@ on:
         required: true
       targets:
         description: >-
-          Comma-separated targets. Any subset of: win-x64-unsigned, mac-arm64.
+          Comma-separated targets. Any subset of: win-x64, mac-arm64, mac-x64.
         type: string
         required: true
-        default: 'win-x64-unsigned,mac-arm64'
+        default: 'win-x64'
 
 permissions:
   contents: read
@@ -49,11 +54,57 @@ env:
   DSH_TELEMETRY_DISABLED: '1'
 
 jobs:
-  win-x64-unsigned:
-    name: win-x64 (unsigned)
-    if: contains(inputs.targets, 'win-x64-unsigned')
-    runs-on: windows-2025
-    timeout-minutes: 90
+  plan:
+    name: plan targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Compute matrix from targets input
+        id: plan
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          matrix='[]'
+          IFS=',' read -r -a targets <<< "$TARGETS"
+          for raw in "${targets[@]}"; do
+            t="$(echo "$raw" | xargs)" # trim surrounding whitespace
+            [ -z "$t" ] && continue
+            case "$t" in
+              win-x64)
+                entry='{"target":"win-x64","runner":"windows-2025","os":"windows","script":"package:win:x64:unsigned","artifacts":"unsigned-artifacts"}'
+                ;;
+              mac-arm64)
+                entry='{"target":"mac-arm64","runner":"macos-latest","os":"macos","script":"package:mac:arm64","artifacts":"artifacts"}'
+                ;;
+              mac-x64)
+                entry='{"target":"mac-x64","runner":"macos-latest","os":"macos","script":"package:mac:x64","artifacts":"artifacts"}'
+                ;;
+              *)
+                echo "::error::Unknown target '$t'. Supported: win-x64, mac-arm64, mac-x64."
+                exit 1
+                ;;
+            esac
+            matrix="$(jq -c --argjson entry "$entry" '. + [$entry]' <<< "$matrix")"
+          done
+          if [ "$matrix" = '[]' ]; then
+            echo "::error::The targets input selected nothing to build."
+            exit 1
+          fi
+          echo "Matrix: $matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: plan
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -64,6 +115,7 @@ jobs:
           dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
 
       - name: Enable Windows Developer Mode (symlink support)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: >-
           reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
@@ -83,7 +135,8 @@ jobs:
           done
           exit 1
 
-      - name: Write target dotenv
+      - name: Write target dotenv (Windows)
+        if: matrix.os == 'windows'
         shell: pwsh
         env:
           DESKTOP_ENV_WINDOWS: ${{ secrets.DESKTOP_ENV_WINDOWS }}
@@ -93,49 +146,8 @@ jobs:
           }
           Set-Content -Path 'apps/desktop/.env.windows' -Value $env:DESKTOP_ENV_WINDOWS -Encoding utf8
 
-      - name: Package
-        shell: pwsh
-        run: >-
-          pnpm run package:desktop:win:x64:unsigned --
-          --build-version ${{ inputs.build_version }}
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: desktop-win-x64-unsigned-${{ inputs.build_version }}
-          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*
-          if-no-files-found: error
-          retention-days: 7
-
-  mac-arm64:
-    name: mac-arm64
-    if: contains(inputs.targets, 'mac-arm64')
-    # macos-latest is Apple Silicon; mac-arm64 requires an arm64 build host.
-    runs-on: macos-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@v4
-        with:
-          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install (immutable)
-        shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            if pnpm install --frozen-lockfile; then exit 0; fi
-            [ "$attempt" -lt 3 ] && sleep 10
-          done
-          exit 1
-
-      - name: Write signing credentials
+      - name: Write signing credentials (macOS)
+        if: matrix.os == 'macos'
         shell: bash
         env:
           CSC_P12: ${{ secrets.DESKTOP_MACOS_CSC_P12 }}
@@ -148,7 +160,8 @@ jobs:
             printf '%s' "$APPLE_API_KEY" | base64 --decode > apps/desktop/AuthKey.p8
           fi
 
-      - name: Write target dotenv
+      - name: Write target dotenv (macOS)
+        if: matrix.os == 'macos'
         shell: bash
         env:
           DESKTOP_ENV_MACOS: ${{ secrets.DESKTOP_ENV_MACOS }}
@@ -160,12 +173,12 @@ jobs:
       - name: Package
         shell: bash
         run: >-
-          pnpm --dir apps/desktop run package:mac:arm64 --
+          pnpm --dir apps/desktop run ${{ matrix.script }} --
           --build-version ${{ inputs.build_version }}
 
       - uses: actions/upload-artifact@v7
         with:
-          name: desktop-mac-arm64-${{ inputs.build_version }}
-          path: apps/desktop/.desktop-build/targets/mac-arm64/artifacts/*
+          name: deepseek-harness-${{ inputs.build_version }}-${{ matrix.target }}
+          path: apps/desktop/.desktop-build/targets/${{ matrix.target }}/${{ matrix.artifacts }}/*
           if-no-files-found: error
           retention-days: 7
