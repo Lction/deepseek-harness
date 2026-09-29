@@ -1,0 +1,171 @@
+# Manual Desktop packaging on GitHub-hosted runners.
+#
+# The Windows target is unsigned here: the release signer needs a SafeNet EV
+# hardware token, which managed runners cannot reach. Signed Windows releases
+# belong on the self-hosted `[self-hosted, dsh-win-ci, windows]` runner.
+# macOS has no unsigned mode in apps/desktop/scripts/package-target.ts, so the
+# mac job always signs and notarizes and needs the certificate secrets below.
+#
+# Required repository secrets:
+#   DESKTOP_ENV_WINDOWS          Full contents of apps/desktop/.env.windows.
+#   DESKTOP_ENV_MACOS            Full contents of apps/desktop/.env.macos. It must
+#                                name CSC_LINK=build-cert.p12 and, for the API-key
+#                                strategy, APPLE_API_KEY=AuthKey.p8; both files are
+#                                written into apps/desktop before packaging.
+#   DESKTOP_MACOS_CSC_P12        Base64 of the Developer ID Application p12.
+#   DESKTOP_MACOS_APPLE_API_KEY  Base64 of the App Store Connect .p8 key.
+#
+# The non-secret release fields the scripts require come from those dotenv files:
+# DSH_DESKTOP_APP_ID, the selected DSH_DESKTOP_MANDATORY_UPDATE_*_ORIGIN, and for
+# signed targets the download origin, release ID and signing identity.
+
+name: Desktop package
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: >-
+          Desktop build version. A production release uses the manifest version
+          (0.2.0-rc.1); a test build appends a date and sequence
+          (0.2.0-rc.1.20260929.1).
+        type: string
+        required: true
+      targets:
+        description: >-
+          Comma-separated targets. Any subset of: win-x64-unsigned, mac-arm64.
+        type: string
+        required: true
+        default: 'win-x64-unsigned,mac-arm64'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-package-${{ github.ref }}-${{ inputs.build_version }}
+  cancel-in-progress: false
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  win-x64-unsigned:
+    name: win-x64 (unsigned)
+    if: contains(inputs.targets, 'win-x64-unsigned')
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
+      - name: Enable Windows Developer Mode (symlink support)
+        shell: pwsh
+        run: >-
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
+          /t REG_DWORD /f /v "AllowDevelopmentWithoutDevLicense" /d "1"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install (immutable)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile; then exit 0; fi
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          exit 1
+
+      - name: Write target dotenv
+        shell: pwsh
+        env:
+          DESKTOP_ENV_WINDOWS: ${{ secrets.DESKTOP_ENV_WINDOWS }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_ENV_WINDOWS)) {
+            throw 'Set the DESKTOP_ENV_WINDOWS repository secret.'
+          }
+          Set-Content -Path 'apps/desktop/.env.windows' -Value $env:DESKTOP_ENV_WINDOWS -Encoding utf8
+
+      - name: Package
+        shell: pwsh
+        run: >-
+          pnpm run package:desktop:win:x64:unsigned --
+          --build-version ${{ inputs.build_version }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-win-x64-unsigned-${{ inputs.build_version }}
+          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  mac-arm64:
+    name: mac-arm64
+    if: contains(inputs.targets, 'mac-arm64')
+    # macos-latest is Apple Silicon; mac-arm64 requires an arm64 build host.
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install (immutable)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile; then exit 0; fi
+            [ "$attempt" -lt 3 ] && sleep 10
+          done
+          exit 1
+
+      - name: Write signing credentials
+        shell: bash
+        env:
+          CSC_P12: ${{ secrets.DESKTOP_MACOS_CSC_P12 }}
+          APPLE_API_KEY: ${{ secrets.DESKTOP_MACOS_APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${CSC_P12:-}" ] || { echo "::error::Set the DESKTOP_MACOS_CSC_P12 repository secret."; exit 1; }
+          printf '%s' "$CSC_P12" | base64 --decode > apps/desktop/build-cert.p12
+          if [ -n "${APPLE_API_KEY:-}" ]; then
+            printf '%s' "$APPLE_API_KEY" | base64 --decode > apps/desktop/AuthKey.p8
+          fi
+
+      - name: Write target dotenv
+        shell: bash
+        env:
+          DESKTOP_ENV_MACOS: ${{ secrets.DESKTOP_ENV_MACOS }}
+        run: |
+          set -euo pipefail
+          [ -n "${DESKTOP_ENV_MACOS:-}" ] || { echo "::error::Set the DESKTOP_ENV_MACOS repository secret."; exit 1; }
+          printf '%s\n' "$DESKTOP_ENV_MACOS" > apps/desktop/.env.macos
+
+      - name: Package
+        shell: bash
+        run: >-
+          pnpm --dir apps/desktop run package:mac:arm64 --
+          --build-version ${{ inputs.build_version }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-mac-arm64-${{ inputs.build_version }}
+          path: apps/desktop/.desktop-build/targets/mac-arm64/artifacts/*
+          if-no-files-found: error
+          retention-days: 7
