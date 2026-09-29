@@ -289,15 +289,23 @@ The proxy fields are independent and reject URL credentials, paths, queries and 
 
 Apple tooling uses the active macOS network service's HTTP/HTTPS proxies. Configured notarization routing checks proxy reachability, saves that service's settings, enables the proxy around both artifact lanes, and restores the saved settings after both lanes settle. An originally disabled proxy with an empty server and port zero is restored by disabling it; the temporary server and port may remain stored but inactive. Directory-only builds apply it to App notarization after the signed directory build. This temporarily affects other applications and requires permission to change system proxies; PAC, auto-discovery, SOCKS and authenticated proxy configurations must be disabled first. Packaging and recovery acquire the same per-user POSIX file lock before reading recovery data or changing proxies; process exit releases ownership, while the lock file remains in place. The lock loads `@deepseek-ai/node-addon-system/flock` at first use rather than at script start, so `check:package` and the packaging entry load on a checkout that has not built `native/system`; when the host addon binary or the entry's JavaScript is missing at lock time, the loader runs `pnpm run build:native-system` and `pnpm --dir native/system run build:ts` before locking, so recovery works on such a checkout as well. This prevents overlapping proxy transactions across checkouts; other users and network-setting tools must not change these settings concurrently. SIGINT/SIGTERM wait for active work before restoration. After forced termination or a restoration error, stop any remaining notarization processes and run `pnpm --dir apps/desktop run restore:mac-proxy`; the saved record remains until restoration succeeds. Configuration checks validate URL syntax without changing system settings or contacting the proxy.
 
-### Unsigned Windows test installer
+### Unsigned test installers
 
-On Windows x64, use the complete unsigned packaging command for local installation testing:
+On a Windows x64 build host, use the complete unsigned packaging command for local installation testing:
 
 ```sh
 pnpm run package:desktop:win:x64:unsigned
 ```
 
 The command requires `DSH_DESKTOP_APP_ID` and the normal build dependencies, including Python and Visual C++ build tools for native modules. Set `PYTHON` to the Python executable when it is absent from `PATH`. It writes the installer to `.desktop-build/targets/win-x64/unsigned-artifacts/`, omits automatic-update configuration, strips signing credentials, and creates no release completion record. It does not require EV credentials or an update origin. The signed packaging and upload commands retain their release requirements.
+
+An explicit `--unsigned` also builds a macOS test application without a Developer ID certificate or notarization:
+
+```sh
+pnpm --dir apps/desktop run package:mac:arm64 -- --unsigned
+```
+
+This mode skips runtime and application signing and notarization, requires only `DSH_DESKTOP_APP_ID` and the selected `DSH_DESKTOP_MANDATORY_UPDATE_*` settings, and writes `-unsigned` artifacts under `.desktop-build/targets/mac-arm64/artifacts/`. macOS shows the unidentified-developer prompt on first open, and a signed release still requires the configured identity and Apple credentials.
 
 ### Windows installer interface
 

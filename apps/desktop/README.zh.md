@@ -291,15 +291,23 @@ Mac 打包从 `.env.macos` 读取三个调优字段：
 
 Apple 工具使用 macOS 当前活动网络服务的 HTTP/HTTPS 代理。配置公证代理后，打包会检查代理可达性、保存该服务的设置，在两条产物任务期间启用代理，并在两条任务均结束后恢复原设置。对于原本关闭、服务器为空且端口为零的代理，恢复时仅关闭代理；临时服务器和端口可能保留，但不生效。仅生成目录的打包会在签名目录构建完成后的 App 公证期间启用代理。这会临时影响其他应用，并要求修改系统代理的权限；必须先禁用 PAC、自动发现、SOCKS 及需要认证的代理配置。打包和恢复在读取恢复记录或修改代理前获取同一个用户级 POSIX 文件锁；进程退出会释放锁的持有权，锁文件保留。该锁在首次使用时才加载 `@deepseek-ai/node-addon-system/flock`，而不是在脚本启动时加载，因此 `check:package` 和打包入口在未构建 `native/system` 的 checkout 上也能加载；加锁时若宿主 addon 二进制或入口的 JavaScript 缺失，加载器会先运行 `pnpm run build:native-system` 和 `pnpm --dir native/system run build:ts` 再加锁，因此恢复命令在这样的 checkout 上同样可用。这会阻止不同 checkout 的代理事务重叠；其他用户及网络设置工具不得同时修改这些设置。SIGINT/SIGTERM 会等待活动任务结束后恢复。强制终止或恢复失败后，先停止残留公证进程，再运行 `pnpm --dir apps/desktop run restore:mac-proxy`；保存的记录会保留到恢复成功。配置检查仅验证 URL 语法，不修改系统设置或连接代理。
 
-### 未签名 Windows 测试安装包
+### 未签名测试安装包
 
-在 Windows x64 上，使用完整的未签名打包命令进行本地安装测试：
+在 Windows x64 构建主机上，使用完整的未签名打包命令进行本地安装测试：
 
 ```sh
 pnpm run package:desktop:win:x64:unsigned
 ```
 
 该命令要求设置 `DSH_DESKTOP_APP_ID` 并具备常规构建依赖，包括编译原生模块所需的 Python 和 Visual C++ 构建工具。Python 不在 `PATH` 中时，将 `PYTHON` 设置为其可执行文件路径。命令将安装包写入 `.desktop-build/targets/win-x64/unsigned-artifacts/`，省略自动更新配置，清除签名凭据，且不生成发布完成记录。它不需要 EV 凭据或更新源地址。签名打包和上传命令仍遵循正式发布要求。
+
+显式传入 `--unsigned` 也可以在没有 Developer ID 证书和公证的情况下构建 macOS 测试应用：
+
+```sh
+pnpm --dir apps/desktop run package:mac:arm64 -- --unsigned
+```
+
+该模式跳过运行时与应用的签名及公证，仅需 `DSH_DESKTOP_APP_ID` 和所选的 `DSH_DESKTOP_MANDATORY_UPDATE_*` 配置，并在 `.desktop-build/targets/mac-arm64/artifacts/` 下写入带 `-unsigned` 的产物。首次打开时 macOS 会显示未识别开发者提示；签名发布仍要求配置证书身份和 Apple 凭据。
 
 ### Windows 安装界面
 
