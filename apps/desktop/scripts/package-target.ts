@@ -408,7 +408,11 @@ export async function packageTarget(
     rmSync(releaseRecordPath, { force: true })
     rmSync(`${releaseRecordPath}.tmp`, { force: true })
   }
-  const buildEnv = withoutWindowsSigningEnvironment(withoutDesktopUploadCredentials(environment))
+  const buildEnv = {
+    ...withoutWindowsSigningEnvironment(withoutDesktopUploadCredentials(environment)),
+    // Preparation subprocesses read this to skip native signing for an unsigned build.
+    DSH_DESKTOP_UNSIGNED: invocation.unsigned ? '1' : '0',
+  }
   const targetEnv: NodeJS.ProcessEnv = {
     ...buildEnv,
     DSH_DESKTOP_TARGET_PLATFORM: target.platform,
@@ -476,7 +480,7 @@ export async function packageTarget(
   if (invocation.prepareOnly) return
   if (target.platform === 'darwin' && invocation.unsigned) {
     await execute([...desktopElectronBuilderArguments(target, invocation.directory), '--config.mac.notarize=false'], electronBuilderEnv)
-    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts'], targetEnv)
+    await execute(['exec', 'tsx', 'scripts/smoke-packaged-runtime.ts', '--unsigned'], targetEnv)
   } else if (target.platform === 'darwin' && !invocation.directory) {
     await execute([
       ...desktopElectronBuilderArguments(target, true),

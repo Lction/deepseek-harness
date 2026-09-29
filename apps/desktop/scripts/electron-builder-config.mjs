@@ -198,6 +198,12 @@ export function createElectronBuilderConfig(
         preparedRuntimeVersion ?? productVersion, { platform: resolvedPlatform, arch: resolvedArch })
       // Unsigned Windows builds skip electron-builder's afterSign hook.
       if (packagesWindows && unsigned) await verifyWindowsAsarUnpack(buildPaths.dsh, resourcesDir, windowsCode)
+      // An unsigned macOS bundle still needs an ad-hoc signature so the arm64 executable passes the
+      // kernel's signature requirement; users still see the unidentified-developer prompt.
+      if (resolvedPlatform === 'darwin' && unsigned) {
+        await promisify(execFile)('/usr/bin/codesign', ['--force', '--deep', '--sign', '-',
+          join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`)])
+      }
     },
     afterSign: async context => {
       if (windowsSigner !== undefined) {
