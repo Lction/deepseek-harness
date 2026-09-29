@@ -1,26 +1,21 @@
 # Manual Desktop packaging on GitHub-hosted runners.
 #
-# Targets:
-#   win-x64       Unsigned installer (the release signer needs a SafeNet EV
-#                 hardware token, which managed runners cannot reach). Signed
-#                 Windows releases belong on the self-hosted
-#                 `[self-hosted, dsh-win-ci, windows]` runner.
-#   mac-arm64,
-#   mac-x64       macOS has no unsigned mode in package-target.ts, so these
-#                 always sign and notarize.
+# Every target here is an unsigned local test build. The release signer needs a
+# SafeNet EV hardware token on Windows and a Developer ID certificate plus Apple
+# notarization on macOS, none of which managed runners can provision. Signed
+# releases belong on a release host with those credentials.
+#
+#   win-x64              Requires a Windows build host.
+#   mac-arm64, mac-x64   Require a macOS host and produce an unnotarized .app,
+#                        .dmg and .zip. macOS will show the "unidentified
+#                        developer" prompt on first open.
 #
 # Required repository secrets:
-#   DESKTOP_ENV_WINDOWS          Full contents of apps/desktop/.env.windows.
-#   DESKTOP_ENV_MACOS            Full contents of apps/desktop/.env.macos. It must
-#                                name CSC_LINK=build-cert.p12 and, for the API-key
-#                                strategy, APPLE_API_KEY=AuthKey.p8; both files are
-#                                written into apps/desktop before packaging.
-#   DESKTOP_MACOS_CSC_P12        Base64 of the Developer ID Application p12.
-#   DESKTOP_MACOS_APPLE_API_KEY  Base64 of the App Store Connect .p8 key.
-#
-# The non-secret release fields the scripts require come from those dotenv files:
-# DSH_DESKTOP_APP_ID, the selected DSH_DESKTOP_MANDATORY_UPDATE_*_ORIGIN, and for
-# signed targets the download origin, release ID and signing identity.
+#   DESKTOP_ENV_WINDOWS   Full contents of apps/desktop/.env.windows.
+#   DESKTOP_ENV_MACOS     Full contents of apps/desktop/.env.macos. For these
+#                         unsigned builds it needs only DSH_DESKTOP_APP_ID and
+#                         the selected DSH_DESKTOP_MANDATORY_UPDATE_* settings;
+#                         signing and notarization fields are not read.
 #
 # Each job uploads one artifact named deepseek-harness-<build_version>-<target>.
 
@@ -74,7 +69,7 @@ jobs:
             [ -z "$t" ] && continue
             case "$t" in
               win-x64)
-                entry='{"target":"win-x64","runner":"windows-2025","os":"windows","script":"package:win:x64:unsigned","artifacts":"unsigned-artifacts"}'
+                entry='{"target":"win-x64","runner":"windows-2025","os":"windows","script":"package:win:x64","artifacts":"unsigned-artifacts"}'
                 ;;
               mac-arm64)
                 entry='{"target":"mac-arm64","runner":"macos-latest","os":"macos","script":"package:mac:arm64","artifacts":"artifacts"}'
@@ -146,20 +141,6 @@ jobs:
           }
           Set-Content -Path 'apps/desktop/.env.windows' -Value $env:DESKTOP_ENV_WINDOWS -Encoding utf8
 
-      - name: Write signing credentials (macOS)
-        if: matrix.os == 'macos'
-        shell: bash
-        env:
-          CSC_P12: ${{ secrets.DESKTOP_MACOS_CSC_P12 }}
-          APPLE_API_KEY: ${{ secrets.DESKTOP_MACOS_APPLE_API_KEY }}
-        run: |
-          set -euo pipefail
-          [ -n "${CSC_P12:-}" ] || { echo "::error::Set the DESKTOP_MACOS_CSC_P12 repository secret."; exit 1; }
-          printf '%s' "$CSC_P12" | base64 --decode > apps/desktop/build-cert.p12
-          if [ -n "${APPLE_API_KEY:-}" ]; then
-            printf '%s' "$APPLE_API_KEY" | base64 --decode > apps/desktop/AuthKey.p8
-          fi
-
       - name: Write target dotenv (macOS)
         if: matrix.os == 'macos'
         shell: bash
@@ -170,11 +151,11 @@ jobs:
           [ -n "${DESKTOP_ENV_MACOS:-}" ] || { echo "::error::Set the DESKTOP_ENV_MACOS repository secret."; exit 1; }
           printf '%s\n' "$DESKTOP_ENV_MACOS" > apps/desktop/.env.macos
 
-      - name: Package
+      - name: Package (unsigned)
         shell: bash
         run: >-
           pnpm --dir apps/desktop run ${{ matrix.script }} --
-          --build-version ${{ inputs.build_version }}
+          --unsigned --build-version ${{ inputs.build_version }}
 
       - uses: actions/upload-artifact@v7
         with:
